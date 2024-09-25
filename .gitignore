@@ -1,2 +1,5 @@
 .venv/
 config.json
+go.sum
+model.json
+schuzky.db

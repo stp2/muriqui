@@ -6,16 +6,16 @@ DROP TABLE IF EXISTS schuzky;
 -- End of removing
 
 CREATE TABLE cleni (
-    id SERIAL NOT NULL PRIMARY KEY,
-    discord_id VARCHAR(256) NOT NULL,
-    jmeno VARCHAR(256) NOT NULL
+    id INTEGER PRIMARY KEY,
+    discord_id TEXT NOT NULL,
+    jmeno TEXT NOT NULL
 );
 
 CREATE TABLE schuzky (
-    id SERIAL NOT NULL PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     cleni_id INTEGER,
-    nazev VARCHAR(256) NOT NULL,
-    kdy DATETIME NOT NULL,
+    nazev TEXT NOT NULL,
+    kdy TEXT NOT NULL,
     FOREIGN KEY(cleni_id) REFERENCES cleni(id)
 );
 
