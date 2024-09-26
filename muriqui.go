@@ -12,9 +12,10 @@ import (
 )
 
 type Config struct {
-	Token    string `json:"token"`
-	Database string `json:"database"`
-	Admin    string `json:"admin"`
+	Token         string `json:"token"`
+	Database      string `json:"database"`
+	Admin         string `json:"admin"`
+	NotifyChannel string `json:"notifyChannel"`
 }
 
 type Schuzka struct {
@@ -45,7 +46,16 @@ func sendMsg(ds *discordgo.Session, userID string, msg string) {
 	}
 }
 
-func sendNotification(ds *discordgo.Session, db *sql.DB) {
+func sendChannelMsg(ds *discordgo.Session, channelID string, msg string) {
+	_, err := ds.ChannelMessageSend(channelID, msg)
+	if err != nil {
+		sendAdmin(err)
+		log.Println("Error sending message:", err)
+		return
+	}
+}
+
+func sendNotification(ds *discordgo.Session, db *sql.DB, channelID string) {
 	var schuzka Schuzka
 	row := db.QueryRow("SELECT schuzky.id, nazev,kdy,jmeno,discord_id, upozorneno FROM schuzky JOIN cleni on schuzky.cleni_id=cleni.id WHERE kdy - unixepoch(datetime()) > 0 ORDER BY kdy ASC LIMIT 1")
 	err := row.Scan(&schuzka.Id, &schuzka.Nazev, &schuzka.Kdy, &schuzka.Jmeno, &schuzka.DiscordID, &schuzka.Upozorneno)
@@ -59,6 +69,7 @@ func sendNotification(ds *discordgo.Session, db *sql.DB) {
 			<-time.After(time.Until(date) - 5*24*time.Hour)
 		}
 		sendMsg(ds, schuzka.DiscordID, "Za 5 dní ("+date.Format(timeFormat)+") máš schůzku "+schuzka.Nazev+"!")
+		sendChannelMsg(ds, channelID, "<@"+schuzka.DiscordID+"> Za 5 dní ("+date.Format(timeFormat)+") má "+schuzka.Jmeno+" schůzku "+schuzka.Nazev+"!")
 		_, err = db.Exec("UPDATE schuzky SET upozorneno=1 WHERE id=?", schuzka.Id)
 		if err != nil {
 			sendAdmin(err)
@@ -101,6 +112,6 @@ func main() {
 	}
 
 	for {
-		sendNotification(ds, db)
+		sendNotification(ds, db, conf.NotifyChannel)
 	}
 }
