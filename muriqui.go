@@ -26,7 +26,7 @@ type Schuzka struct {
 	Kdy        int64
 	Jmeno      string
 	DiscordID  string
-	Upozorneno int
+	Upozorneno string
 }
 
 const (
@@ -37,47 +37,74 @@ var adminID string
 var db *sql.DB
 var ds *discordgo.Session
 
-func sendMsg(userID string, msg string) {
+func sendMsg(userID string, msg string) string {
 	channel, err := ds.UserChannelCreate(userID)
 	if err != nil {
 		log.Println("Error creating channel:", err)
-		return
+		return ""
 	}
-	_, err = ds.ChannelMessageSend(channel.ID, msg)
+	m, err := ds.ChannelMessageSend(channel.ID, msg)
 	if err != nil {
 		log.Println("Error sending message:", err)
-		return
+		return ""
 	}
+	return m.ID
 }
 
 func sendAdmin(err error) {
 	sendMsg(adminID, err.Error())
 }
-func sendChannelMsg(channelID string, msg string) {
-	_, err := ds.ChannelMessageSend(channelID, msg)
+func sendChannelMsg(channelID string, msg string) string {
+	m, err := ds.ChannelMessageSend(channelID, msg)
 	if err != nil {
 		sendAdmin(err)
 		log.Println("Error sending message:", err)
-		return
+		return ""
 	}
+	return m.ID
+}
+
+func reacted(mID string, uID string) bool {
+	if mID == "" {
+		return false
+	}
+	channel, err := ds.UserChannelCreate(uID)
+	if err != nil {
+		log.Println("Error creating channel:", err)
+		return false
+	}
+	msg, err := ds.ChannelMessage(channel.ID, mID)
+	if err != nil {
+		log.Println("Error getting message:", err)
+		return false
+	}
+	if len(msg.Reactions) == 0 {
+		return false
+	}
+	return true
 }
 
 func sendNotification(channelID string) {
 	var schuzka Schuzka
 	row := db.QueryRow("SELECT schuzky.id, nazev,kdy,jmeno,discord_id, upozorneno FROM schuzky JOIN cleni on schuzky.cleni_id=cleni.id WHERE kdy - unixepoch(datetime()) > 0 ORDER BY kdy ASC LIMIT 1")
 	err := row.Scan(&schuzka.Id, &schuzka.Nazev, &schuzka.Kdy, &schuzka.Jmeno, &schuzka.DiscordID, &schuzka.Upozorneno)
+	if err == sql.ErrNoRows {
+		return
+	}
 	if err != nil {
 		sendAdmin(err)
 		log.Fatalln("Error getting next meeting:", err)
 	}
 	date := time.Unix(schuzka.Kdy, 0)
-	if schuzka.Upozorneno == 0 {
+	if !reacted(schuzka.Upozorneno, schuzka.DiscordID) {
 		if time.Until(date) > 5*24*time.Hour {
 			return
 		}
-		sendMsg(schuzka.DiscordID, "Za 5 dní ("+date.Format(timeFormat)+") máš schůzku "+schuzka.Nazev+"!")
-		sendChannelMsg(channelID, "<@"+schuzka.DiscordID+"> Za 5 dní ("+date.Format(timeFormat)+") má "+schuzka.Jmeno+" schůzku "+schuzka.Nazev+"!")
-		_, err = db.Exec("UPDATE schuzky SET upozorneno=1 WHERE id=?", schuzka.Id)
+		mID := sendMsg(schuzka.DiscordID, "Za 5 dní ("+date.Format(timeFormat)+") máš schůzku "+schuzka.Nazev+"!\nReaguj na tuto zprávu, pokud jsi upozorněn.\nNa tu poslední.")
+		if schuzka.Upozorneno == "" {
+			sendChannelMsg(channelID, "<@"+schuzka.DiscordID+"> Za 5 dní ("+date.Format(timeFormat)+") má "+schuzka.Jmeno+" schůzku "+schuzka.Nazev+"!")
+		}
+		_, err = db.Exec("UPDATE schuzky SET upozorneno=? WHERE id=?", mID, schuzka.Id)
 		if err != nil {
 			sendAdmin(err)
 			log.Fatalln("Error updating meeting:", err)
@@ -108,8 +135,11 @@ func listMeetings(all bool) string {
 			log.Fatalln("Error scanning meetings:", err)
 		}
 		date := time.Unix(schuzka.Kdy, 0)
-		out += strings.Join([]string{strconv.Itoa(schuzka.Id), schuzka.Nazev, date.Format(timeFormat), schuzka.Jmeno, schuzka.DiscordID, strconv.Itoa(schuzka.Upozorneno)}, "|")
+		out += strings.Join([]string{strconv.Itoa(schuzka.Id), schuzka.Nazev, date.Format(timeFormat), schuzka.Jmeno, schuzka.DiscordID, schuzka.Upozorneno}, "|")
 		out += "\n"
+	}
+	if out == "" {
+		out = "No meetings found"
 	}
 	return out
 }
@@ -134,6 +164,9 @@ func listMembers() string {
 		out += strings.Join([]string{strconv.Itoa(id), jmeno, discordID}, "|")
 		out += "\n"
 	}
+	if out == "" {
+		out = "No members found"
+	}
 	return out
 }
 
@@ -148,7 +181,13 @@ func addMember(jmeno string, discordID string) bool {
 }
 
 func addMeeting(nazev string, kdyS string, cleniID int) bool {
-	kdy, err := time.Parse(timeFormat, kdyS)
+	loc, err := time.LoadLocation("Europe/Prague")
+	if err != nil {
+		sendAdmin(err)
+		log.Println("Error loading location:", err)
+		return false
+	}
+	kdy, err := time.ParseInLocation(timeFormat, kdyS, loc)
 	if err != nil {
 		sendAdmin(err)
 		log.Println("Error parsing date:", err)
@@ -157,7 +196,8 @@ func addMeeting(nazev string, kdyS string, cleniID int) bool {
 	_, err = db.Exec("INSERT INTO schuzky (nazev, kdy, cleni_id) VALUES (?, ?, ?)", nazev, kdy.Unix(), cleniID)
 	if err != nil {
 		sendAdmin(err)
-		log.Fatalln("Error adding meeting:", err)
+		log.Println("Error adding meeting:", err)
+		return false
 	}
 	return true
 }

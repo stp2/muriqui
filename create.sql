@@ -16,7 +16,7 @@ CREATE TABLE schuzky (
     cleni_id INTEGER,
     nazev TEXT NOT NULL,
     kdy INTEGER NOT NULL, -- čas v UTC
-    upozorneno INTEGER NOT NULL DEFAULT 0,
+    upozorneno TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(cleni_id) REFERENCES cleni(id) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
