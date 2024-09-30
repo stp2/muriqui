@@ -10,7 +10,8 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	_ "github.com/glebarez/go-sqlite"
+	//_ "github.com/glebarez/go-sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Config struct {
@@ -251,6 +252,12 @@ func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 }
 
+func sleepNext() <-chan time.Time {
+	tn := time.Now()
+	t := tn.Truncate(24 * time.Hour).Add(24 * time.Hour)
+	return time.After(t.Sub(tn))
+}
+
 func main() {
 	// Load configuration
 	confB, err := os.ReadFile("config.json")
@@ -264,7 +271,7 @@ func main() {
 	}
 	adminID = conf.Admin
 	// Open database
-	db, err = sql.Open("sqlite", conf.Database)
+	db, err = sql.Open("sqlite3", conf.Database)
 	if err != nil {
 		log.Fatalln("Error opening database:", err)
 	}
@@ -287,7 +294,7 @@ func main() {
 	log.Println("Bot is now running.")
 
 	for {
+		<-sleepNext()
 		sendNotification(conf.NotifyChannel)
-		time.Sleep(1 * time.Minute)
 	}
 }
