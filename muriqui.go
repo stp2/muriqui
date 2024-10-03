@@ -254,7 +254,10 @@ func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
 
 func sleepNext() <-chan time.Time {
 	tn := time.Now()
-	t := tn.Truncate(24 * time.Hour).Add(24 * time.Hour)
+	t := tn.Truncate(24 * time.Hour).Add((24 + 14) * time.Hour)
+	if t.IsDST() {
+		t = t.Add(-time.Hour)
+	}
 	return time.After(t.Sub(tn))
 }
 
