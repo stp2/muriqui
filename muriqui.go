@@ -147,7 +147,7 @@ func listMeetings(all bool) string {
 
 func listMembers() string {
 	var out string
-	rows, err := db.Query("SELECT * FROM cleni")
+	rows, err := db.Query("SELECT id,jmeno,discord_id FROM cleni")
 	if err != nil {
 		sendAdmin(err)
 		log.Fatalln("Error getting members:", err)
@@ -203,6 +203,26 @@ func addMeeting(nazev string, kdyS string, cleniID int) bool {
 	return true
 }
 
+func removeMeeting(id int) bool {
+	_, err := db.Exec("DELETE FROM schuzky WHERE id=?", id)
+	if err != nil {
+		sendAdmin(err)
+		log.Println("Error removing meeting:", err)
+		return false
+	}
+	return true
+}
+
+func removeMember(id int) bool {
+	_, err := db.Exec("DELETE FROM cleni WHERE id=?", id)
+	if err != nil {
+		sendAdmin(err)
+		log.Println("Error removing member:", err)
+		return false
+	}
+	return true
+}
+
 func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.ID == ds.State.User.ID {
 		return
@@ -212,12 +232,14 @@ func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 	switch {
 	case m.Content == "help":
-		sendMsg(m.Author.ID, "Commands: ls, la, lm, ac, as")
+		sendMsg(m.Author.ID, "Commands: ls, la, lm, ac, as, rm, rc")
 		sendMsg(m.Author.ID, "ls - list meetings")
 		sendMsg(m.Author.ID, "la - list all meetings")
 		sendMsg(m.Author.ID, "lc - list members")
 		sendMsg(m.Author.ID, "ac jmeno|discordID - add member")
 		sendMsg(m.Author.ID, "as nazev|datum|clenID - add meeting")
+		sendMsg(m.Author.ID, "rm id - remove meeting")
+		sendMsg(m.Author.ID, "rc id - remove member")
 	case m.Content == "ls":
 		sendMsg(m.Author.ID, listMeetings(false))
 	case m.Content == "la":
@@ -232,6 +254,8 @@ func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
 		}
 		if addMember(parts[0], parts[1]) {
 			sendMsg(m.Author.ID, "Member added")
+		} else {
+			sendMsg(m.Author.ID, "Error adding member")
 		}
 	case strings.HasPrefix(m.Content, "as "):
 		parts := strings.Split(m.Content[3:], "|")
@@ -246,6 +270,30 @@ func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
 		}
 		if addMeeting(parts[0], parts[1], cleniID) {
 			sendMsg(m.Author.ID, "Meeting added")
+		} else {
+			sendMsg(m.Author.ID, "Error adding meeting")
+		}
+	case strings.HasPrefix(m.Content, "rm "):
+		id, err := strconv.Atoi(m.Content[3:])
+		if err != nil {
+			sendMsg(m.Author.ID, "Invalid meeting ID")
+			return
+		}
+		if removeMeeting(id) {
+			sendMsg(m.Author.ID, "Meeting removed")
+		} else {
+			sendMsg(m.Author.ID, "Error removing meeting")
+		}
+	case strings.HasPrefix(m.Content, "rc "):
+		id, err := strconv.Atoi(m.Content[3:])
+		if err != nil {
+			sendMsg(m.Author.ID, "Invalid member ID")
+			return
+		}
+		if removeMember(id) {
+			sendMsg(m.Author.ID, "Member removed")
+		} else {
+			sendMsg(m.Author.ID, "Error removing member")
 		}
 	default:
 		sendMsg(m.Author.ID, "Unknown command")
