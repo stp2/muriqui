@@ -22,23 +22,40 @@ type Config struct {
 }
 
 type Schuzka struct {
-	Id         int
+	Id         int64
 	Nazev      string
 	Kdy        int64
-	Jmeno      string
-	DiscordID  string
-	Upozorneno string
+	Upozorneno bool
+}
+
+type Poradajici struct {
+	ID        int64
+	Jmeno     string
+	DiscordID string
+	ZpravaID  string
+}
+
+type Meeting struct {
+	ID         int64
+	Nazev      string
+	Kdy        int64
+	Kdo        string
+	Upozorneno bool
+	ZpravaID   string
+}
+
+type Member struct {
+	ID        int64
+	Jmeno     string
+	DiscordID string
 }
 
 const (
 	timeFormat = "2.1. 2006 15:04"
+	notifyTime = 5 * 24 * 3600
 )
 
-var adminID string
-var db *sql.DB
-var ds *discordgo.Session
-
-func sendMsg(userID string, msg string) string {
+func sendMsg(ds *discordgo.Session, userID string, msg string) string {
 	channel, err := ds.UserChannelCreate(userID)
 	if err != nil {
 		log.Println("Error creating channel:", err)
@@ -52,20 +69,19 @@ func sendMsg(userID string, msg string) string {
 	return m.ID
 }
 
-func sendAdmin(err error) {
-	sendMsg(adminID, err.Error())
-}
-func sendChannelMsg(channelID string, msg string) string {
+var sendAdmin func(*discordgo.Session, error) // closure in main
+
+func sendChannelMsg(ds *discordgo.Session, channelID string, msg string) string {
 	m, err := ds.ChannelMessageSend(channelID, msg)
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Println("Error sending message:", err)
 		return ""
 	}
 	return m.ID
 }
 
-func reacted(mID string, uID string) bool {
+func reacted(ds *discordgo.Session, mID string, uID string) bool {
 	if mID == "" {
 		return false
 	}
@@ -85,58 +101,117 @@ func reacted(mID string, uID string) bool {
 	return true
 }
 
-func sendNotification(channelID string) {
-	var schuzka Schuzka
-	row := db.QueryRow("SELECT schuzky.id, nazev,kdy,jmeno,discord_id, upozorneno FROM schuzky JOIN cleni on schuzky.cleni_id=cleni.id WHERE kdy - unixepoch(datetime()) > 0 ORDER BY kdy ASC LIMIT 1")
-	err := row.Scan(&schuzka.Id, &schuzka.Nazev, &schuzka.Kdy, &schuzka.Jmeno, &schuzka.DiscordID, &schuzka.Upozorneno)
-	if err == sql.ErrNoRows {
-		return
-	}
+func sendNotification(ds *discordgo.Session, db *sql.DB, channelID string) {
+	schuzky := make([]Schuzka, 0)
+	row, err := db.Query(
+		`SELECT id, nazev, kdy, upozorneno
+        FROM schuzky
+        WHERE kdy - unixepoch(datetime()) >= 0 AND kdy - unixepoch(datetime()) <= ?;`,
+		notifyTime)
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Fatalln("Error getting next meeting:", err)
 	}
-	date := time.Unix(schuzka.Kdy, 0)
-	if !reacted(schuzka.Upozorneno, schuzka.DiscordID) {
-		if time.Until(date) > 5*24*time.Hour {
-			return
-		}
-		mID := sendMsg(schuzka.DiscordID, "Za 5 dní ("+date.Format(timeFormat)+") máš schůzku "+schuzka.Nazev+"!\nReaguj na tuto zprávu, pokud jsi upozorněn.\nNa tu poslední.")
-		if schuzka.Upozorneno == "" {
-			sendChannelMsg(channelID, "<@"+schuzka.DiscordID+"> Za 5 dní ("+date.Format(timeFormat)+") má "+schuzka.Jmeno+" schůzku "+schuzka.Nazev+"!")
-		}
-		_, err = db.Exec("UPDATE schuzky SET upozorneno=? WHERE id=?", mID, schuzka.Id)
+	for row.Next() {
+		var schuzka Schuzka
+		row.Scan(&schuzka.Id, &schuzka.Nazev, &schuzka.Kdy, &schuzka.Upozorneno)
+		schuzky = append(schuzky, schuzka)
+	}
+	row.Close()
+	for _, schuzka := range schuzky {
+		date := time.Unix(schuzka.Kdy, 0)
+		cleni := make([]Poradajici, 0)
+		cleniRow, err := db.Query(
+			`SELECT cleni.id, jmeno, discord_id, zprava_id
+            FROM cleni
+            JOIN porada ON cleni.id = porada.cleni_id
+            WHERE porada.schuzky_id = ?;`,
+			schuzka.Id)
 		if err != nil {
-			sendAdmin(err)
-			log.Fatalln("Error updating meeting:", err)
+			sendAdmin(ds, err)
+			log.Fatalln("Error getting members:", err)
+		}
+		for cleniRow.Next() {
+			var clen Poradajici
+			cleniRow.Scan(&clen.ID, &clen.Jmeno, &clen.DiscordID, &clen.ZpravaID)
+			cleni = append(cleni, clen)
+		}
+		cleniRow.Close()
+		if !schuzka.Upozorneno {
+			mentions := ""
+			for _, clen := range cleni {
+				mentions += "<@" + clen.DiscordID + "> "
+			}
+			if len(cleni) == 1 {
+				sendChannelMsg(ds, channelID, mentions+date.Format(timeFormat)+" má schůzku "+schuzka.Nazev+"!")
+			} else if len(cleni) > 1 {
+				sendChannelMsg(ds, channelID, mentions+date.Format(timeFormat)+" mají schůzku "+schuzka.Nazev+"!")
+			} else {
+				sendMsg(ds, channelID, date.Format(timeFormat)+") je schůzka "+schuzka.Nazev+"!")
+			}
+			_, err = db.Exec(`UPDATE schuzky
+            SET upozorneno=1
+            WHERE id=?`, schuzka.Id)
+			if err != nil {
+				sendAdmin(ds, err)
+				log.Fatalln("Error updating meeting:", err)
+			}
+		}
+		for _, clen := range cleni {
+			if !reacted(ds, clen.ZpravaID, clen.DiscordID) {
+				mID := sendMsg(ds, clen.DiscordID, date.Format(timeFormat)+" máš schůzku "+schuzka.Nazev+"!\nReaguj na tuto zprávu, pokud jsi upozorněn.\nNa tu poslední.")
+				_, err = db.Exec(`UPDATE porada
+                SET zprava_id=?
+                WHERE cleni_id=? AND schuzky_id=?`,
+					mID, clen.ID, schuzka.Id)
+				if err != nil {
+					sendAdmin(ds, err)
+					log.Fatalln("Error updating meeting:", err)
+				}
+			}
 		}
 	}
 }
 
-func listMeetings(all bool) string {
+func listMeetings(ds *discordgo.Session, db *sql.DB, all bool) string {
 	var out string
 	var rows *sql.Rows
 	var err error
+	var notify string
 
 	if all {
-		rows, err = db.Query("SELECT schuzky.id, nazev,kdy,jmeno,discord_id, upozorneno FROM schuzky JOIN cleni on schuzky.cleni_id=cleni.id ORDER BY kdy ASC")
+		rows, err = db.Query(`SELECT schuzky.id, nazev,kdy,jmeno,upozorneno,zprava_id
+        FROM schuzky
+        JOIN porada ON schuzky.id = porada.schuzky_id
+        JOIN cleni ON porada.cleni_id = cleni.id
+        WHERE kdy - unixepoch(datetime()) >= 0
+        ORDER BY kdy ASC;`)
 	} else {
-		rows, err = db.Query("SELECT schuzky.id, nazev,kdy,jmeno,discord_id, upozorneno FROM schuzky JOIN cleni on schuzky.cleni_id=cleni.id WHERE kdy - unixepoch(datetime()) > 0 ORDER BY kdy ASC")
+		rows, err = db.Query(`SELECT schuzky.id, nazev,kdy,jmeno,upozorneno,zprava_id
+        FROM schuzky
+        JOIN porada ON schuzky.id = porada.schuzky_id
+        JOIN cleni ON porada.cleni_id = cleni.id
+        ORDER BY kdy ASC;`)
 	}
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Fatalln("Error getting meetings:", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var schuzka Schuzka
-		err = rows.Scan(&schuzka.Id, &schuzka.Nazev, &schuzka.Kdy, &schuzka.Jmeno, &schuzka.DiscordID, &schuzka.Upozorneno)
+		var schuzka Meeting
+		err = rows.Scan(&schuzka.ID, &schuzka.Nazev, &schuzka.Kdy, &schuzka.Kdo, &schuzka.Upozorneno, &schuzka.ZpravaID)
 		if err != nil {
-			sendAdmin(err)
+			sendAdmin(ds, err)
 			log.Fatalln("Error scanning meetings:", err)
 		}
 		date := time.Unix(schuzka.Kdy, 0)
-		out += strings.Join([]string{strconv.Itoa(schuzka.Id), schuzka.Nazev, date.Format(timeFormat), schuzka.Jmeno, schuzka.DiscordID, schuzka.Upozorneno}, "|")
+		if schuzka.Upozorneno {
+			notify = "ano"
+		} else {
+			notify = "ne"
+		}
+		out += strings.Join([]string{strconv.Itoa(int(schuzka.ID)), schuzka.Nazev, date.Format(timeFormat), schuzka.Kdo, notify, schuzka.ZpravaID}, "|")
 		out += "\n"
 	}
 	if out == "" {
@@ -145,24 +220,22 @@ func listMeetings(all bool) string {
 	return out
 }
 
-func listMembers() string {
+func listMembers(ds *discordgo.Session, db *sql.DB) string {
 	var out string
 	rows, err := db.Query("SELECT id,jmeno,discord_id FROM cleni")
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Fatalln("Error getting members:", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id int
-		var jmeno string
-		var discordID string
-		err = rows.Scan(&id, &jmeno, &discordID)
+		var member Member
+		err = rows.Scan(&member.ID, &member.Jmeno, &member.DiscordID)
 		if err != nil {
-			sendAdmin(err)
+			sendAdmin(ds, err)
 			log.Fatalln("Error scanning members:", err)
 		}
-		out += strings.Join([]string{strconv.Itoa(id), jmeno, discordID}, "|")
+		out += strings.Join([]string{strconv.Itoa(int(member.ID)), member.Jmeno, member.DiscordID}, "|")
 		out += "\n"
 	}
 	if out == "" {
@@ -171,59 +244,81 @@ func listMembers() string {
 	return out
 }
 
-func addMember(jmeno string, discordID string) bool {
+func addMember(ds *discordgo.Session, db *sql.DB, jmeno string, discordID string) bool {
 	_, err := db.Exec("INSERT INTO cleni (jmeno, discord_id) VALUES (?, ?)", jmeno, discordID)
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Println("Error adding member:", err)
 		return false
 	}
 	return true
 }
 
-func addMeeting(nazev string, kdyS string, cleniID int) bool {
+func addMeeting(ds *discordgo.Session, db *sql.DB, nazev string, kdyS string, cleniID []int) bool {
 	loc, err := time.LoadLocation("Europe/Prague")
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Println("Error loading location:", err)
 		return false
 	}
 	kdy, err := time.ParseInLocation(timeFormat, kdyS, loc)
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Println("Error parsing date:", err)
 		return false
 	}
-	_, err = db.Exec("INSERT INTO schuzky (nazev, kdy, cleni_id) VALUES (?, ?, ?)", nazev, kdy.Unix(), cleniID)
+	_, err = db.Exec("INSERT INTO schuzky (nazev, kdy) VALUES (?, ?)", nazev, kdy.Unix())
 	if err != nil {
-		sendAdmin(err)
-		log.Println("Error adding meeting:", err)
+		sendAdmin(ds, err)
+		log.Println("Error adding member to meeting:", err)
 		return false
+	}
+	var lastID int
+	lastIDR := db.QueryRow("SELECT last_insert_rowid()")
+	err = lastIDR.Scan(&lastID)
+	if err != nil {
+		sendAdmin(ds, err)
+		log.Println("Error getting last ID:", err)
+		return false
+	}
+	for _, id := range cleniID {
+		_, err = db.Exec("INSERT INTO porada (cleni_id, schuzky_id) VALUES (?, ?)", id, lastID)
+		if err != nil {
+			sendAdmin(ds, err)
+			log.Println("Error adding member to meeting:", err)
+			return false
+		}
 	}
 	return true
 }
 
-func removeMeeting(id int) bool {
-	_, err := db.Exec("DELETE FROM schuzky WHERE id=?", id)
+func removeMeeting(ds *discordgo.Session, db *sql.DB, id int) bool {
+	_, err := db.Exec("DELETE FROM porada WHERE schuzky_id=?", id)
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
+		log.Println("Error removing meeting:", err)
+		return false
+	}
+	_, err = db.Exec("DELETE FROM schuzky WHERE id=?", id)
+	if err != nil {
+		sendAdmin(ds, err)
 		log.Println("Error removing meeting:", err)
 		return false
 	}
 	return true
 }
 
-func removeMember(id int) bool {
+func removeMember(ds *discordgo.Session, db *sql.DB, id int) bool {
 	_, err := db.Exec("DELETE FROM cleni WHERE id=?", id)
 	if err != nil {
-		sendAdmin(err)
+		sendAdmin(ds, err)
 		log.Println("Error removing member:", err)
 		return false
 	}
 	return true
 }
 
-func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
+func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate, db *sql.DB, adminID string) {
 	if m.Author.ID == ds.State.User.ID {
 		return
 	}
@@ -232,71 +327,77 @@ func commandHandler(ds *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 	switch {
 	case m.Content == "help":
-		sendMsg(m.Author.ID, "Commands: ls, la, lm, ac, as, rm, rc")
-		sendMsg(m.Author.ID, "ls - list meetings")
-		sendMsg(m.Author.ID, "la - list all meetings")
-		sendMsg(m.Author.ID, "lc - list members")
-		sendMsg(m.Author.ID, "ac jmeno|discordID - add member")
-		sendMsg(m.Author.ID, "as nazev|datum|clenID - add meeting")
-		sendMsg(m.Author.ID, "rm id - remove meeting")
-		sendMsg(m.Author.ID, "rc id - remove member")
+		msg := "Commands: ls, la, lm, ac, as, rm, rc\n"
+		msg += "ls - list meetings\n"
+		msg += "la - list all meetings\n"
+		msg += "lc - list members\n"
+		msg += "ac jmeno|discordID - add member\n"
+		msg += "as nazev|datum|clenID(odděleno čárkou) - add meeting\n"
+		msg += "rm id - remove meeting\n"
+		msg += "rc id - remove member\n"
+		sendMsg(ds, m.Author.ID, msg)
 	case m.Content == "ls":
-		sendMsg(m.Author.ID, listMeetings(false))
+		sendMsg(ds, m.Author.ID, listMeetings(ds, db, false))
 	case m.Content == "la":
-		sendMsg(m.Author.ID, listMeetings(true))
+		sendMsg(ds, m.Author.ID, listMeetings(ds, db, true))
 	case m.Content == "lc":
-		sendMsg(m.Author.ID, listMembers())
+		sendMsg(ds, m.Author.ID, listMembers(ds, db))
 	case strings.HasPrefix(m.Content, "ac "):
 		parts := strings.Split(m.Content[3:], "|")
 		if len(parts) != 2 {
-			sendMsg(m.Author.ID, "Usage: ac jmeno|discordID")
+			sendMsg(ds, m.Author.ID, "Usage: ac jmeno|discordID")
 			return
 		}
-		if addMember(parts[0], parts[1]) {
-			sendMsg(m.Author.ID, "Member added")
+		if addMember(ds, db, parts[0], parts[1]) {
+			sendMsg(ds, m.Author.ID, "Member added")
 		} else {
-			sendMsg(m.Author.ID, "Error adding member")
+			sendMsg(ds, m.Author.ID, "Error adding member")
 		}
 	case strings.HasPrefix(m.Content, "as "):
 		parts := strings.Split(m.Content[3:], "|")
 		if len(parts) != 3 {
-			sendMsg(m.Author.ID, "Usage: as nazev|datum|clenID")
+			sendMsg(ds, m.Author.ID, "Usage: as nazev|datum|clenID")
 			return
 		}
-		cleniID, err := strconv.Atoi(parts[2])
-		if err != nil {
-			sendMsg(m.Author.ID, "Invalid member ID")
-			return
+		cleni := strings.Split(parts[2], ",")
+		cleniID := make([]int, 0)
+		for _, id := range cleni {
+			idI, err := strconv.Atoi(id)
+			if err != nil {
+				sendMsg(ds, m.Author.ID, "Invalid member ID")
+				return
+			}
+			cleniID = append(cleniID, idI)
 		}
-		if addMeeting(parts[0], parts[1], cleniID) {
-			sendMsg(m.Author.ID, "Meeting added")
+		if addMeeting(ds, db, parts[0], parts[1], cleniID) {
+			sendMsg(ds, m.Author.ID, "Meeting added")
 		} else {
-			sendMsg(m.Author.ID, "Error adding meeting")
+			sendMsg(ds, m.Author.ID, "Error adding meeting")
 		}
 	case strings.HasPrefix(m.Content, "rm "):
 		id, err := strconv.Atoi(m.Content[3:])
 		if err != nil {
-			sendMsg(m.Author.ID, "Invalid meeting ID")
+			sendMsg(ds, m.Author.ID, "Invalid meeting ID")
 			return
 		}
-		if removeMeeting(id) {
-			sendMsg(m.Author.ID, "Meeting removed")
+		if removeMeeting(ds, db, id) {
+			sendMsg(ds, m.Author.ID, "Meeting removed")
 		} else {
-			sendMsg(m.Author.ID, "Error removing meeting")
+			sendMsg(ds, m.Author.ID, "Error removing meeting")
 		}
 	case strings.HasPrefix(m.Content, "rc "):
 		id, err := strconv.Atoi(m.Content[3:])
 		if err != nil {
-			sendMsg(m.Author.ID, "Invalid member ID")
+			sendMsg(ds, m.Author.ID, "Invalid member ID")
 			return
 		}
-		if removeMember(id) {
-			sendMsg(m.Author.ID, "Member removed")
+		if removeMember(ds, db, id) {
+			sendMsg(ds, m.Author.ID, "Member removed")
 		} else {
-			sendMsg(m.Author.ID, "Error removing member")
+			sendMsg(ds, m.Author.ID, "Error removing member")
 		}
 	default:
-		sendMsg(m.Author.ID, "Unknown command")
+		sendMsg(ds, m.Author.ID, "Unknown command")
 	}
 }
 
@@ -320,20 +421,24 @@ func main() {
 	if err != nil {
 		log.Fatalln("Error parsing config file:", err)
 	}
-	adminID = conf.Admin
+	sendAdmin = func(ds *discordgo.Session, err error) {
+		sendMsg(ds, conf.Admin, "Error: "+err.Error())
+	}
 	// Open database
-	db, err = sql.Open("sqlite3", conf.Database)
+	db, err := sql.Open("sqlite3", conf.Database)
 	if err != nil {
 		log.Fatalln("Error opening database:", err)
 	}
 	db.Exec("PRAGMA foreign_keys = ON;") // Enable foreign keys
 	// Open Discord session
-	ds, err = discordgo.New("Bot " + conf.Token)
+	ds, err := discordgo.New("Bot " + conf.Token)
 	if err != nil {
 		log.Fatalln("Error creating Discord session:", err)
 	}
 	// Register command handler
-	ds.AddHandler(commandHandler)
+	ds.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+		commandHandler(s, m, db, conf.Admin)
+	})
 	ds.Identify.Intents = discordgo.IntentsDirectMessages
 	// Open discord websocket
 	err = ds.Open()
@@ -344,8 +449,9 @@ func main() {
 
 	log.Println("Bot is now running.")
 
+	sendNotification(ds, db, conf.NotifyChannel)
 	for {
 		<-sleepNext()
-		sendNotification(conf.NotifyChannel)
+		sendNotification(ds, db, conf.NotifyChannel)
 	}
 }
