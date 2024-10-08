@@ -184,13 +184,13 @@ func listMeetings(ds *discordgo.Session, db *sql.DB, all bool) string {
         FROM schuzky
         JOIN porada ON schuzky.id = porada.schuzky_id
         JOIN cleni ON porada.cleni_id = cleni.id
-        WHERE kdy - unixepoch(datetime()) >= 0
         ORDER BY kdy ASC;`)
 	} else {
 		rows, err = db.Query(`SELECT schuzky.id, nazev,kdy,jmeno,upozorneno,zprava_id
         FROM schuzky
         JOIN porada ON schuzky.id = porada.schuzky_id
         JOIN cleni ON porada.cleni_id = cleni.id
+        WHERE kdy - unixepoch(datetime()) >= 0
         ORDER BY kdy ASC;`)
 	}
 	if err != nil {
@@ -449,7 +449,6 @@ func main() {
 
 	log.Println("Bot is now running.")
 
-	sendNotification(ds, db, conf.NotifyChannel)
 	for {
 		<-sleepNext()
 		sendNotification(ds, db, conf.NotifyChannel)
