@@ -4,7 +4,7 @@ from datetime import datetime
 import time
 
 
-with open('D:/Python3.10/token.txt', 'r') as f:
+with open('token.txt', 'r') as f:
     token = f.read()
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
